@@ -8,9 +8,19 @@ import cv2
 from keras.applications.resnet50 import ResNet50, preprocess_input
 from keras.preprocessing import image
 from keras.models import Model
-from keras import backend as K
+import tensorflow as tf
 
 app = Flask(__name__)
+model = None
+
+def load_model():
+    # load the pre-trained Keras model (here we are using a model
+    # pre-trained on ImageNet and provided by Keras, but you can
+    # substitute in your own networks just as easily)
+    global model
+    model = ResNet50(weights="imagenet")
+    global graph
+    graph = tf.get_default_graph()
 
 def pretrained_path_to_tensor(img_path):
     # loads RGB image as PIL.Image.Image type
@@ -23,8 +33,7 @@ def pretrained_path_to_tensor(img_path):
     return preprocess_input(x)
 
 def get_ResNet():
-    # define ResNet50 model
-    model = ResNet50(weights='imagenet')
+
     # get AMP layer weights
     all_amp_layer_weights = model.layers[-1].get_weights()[0]
     # extract wanted output
@@ -34,7 +43,8 @@ def get_ResNet():
 
 def ResNet_CAM(img_path, model, all_amp_layer_weights):
     # get filtered images from convolutional output + model prediction vector
-    last_conv_output, pred_vec = model.predict(pretrained_path_to_tensor(img_path))
+    with graph.as_default():
+        last_conv_output, pred_vec = model.predict(pretrained_path_to_tensor(img_path))
     # change dimensions of last convolutional outpu tto 7 x 7 x 2048
     last_conv_output = np.squeeze(last_conv_output)
     # get model's prediction (number between 0 and 999, inclusive)
@@ -48,13 +58,12 @@ def ResNet_CAM(img_path, model, all_amp_layer_weights):
     # return class activation map
     return final_output, pred
 
-def plot_ResNet_CAM(img_path, ax, model, all_amp_layer_weights):
+def plot_ResNet_CAM(img_path, CAM, pred):
+    fig, ax = plt.subplots()
     # load image, convert BGR --> RGB, resize image to 224 x 224,
     im = cv2.resize(cv2.cvtColor(cv2.imread(img_path), cv2.COLOR_BGR2RGB), (224, 224))
     # plot image
     ax.imshow(im, alpha=0.5)
-    # get class activation map
-    CAM, pred = ResNet_CAM(img_path, model, all_amp_layer_weights)
     # plot class activation map
     ax.imshow(CAM, cmap='jet', alpha=0.5)
     # load the dictionary that identifies each ImageNet category to an index in the prediction vector
@@ -62,26 +71,29 @@ def plot_ResNet_CAM(img_path, ax, model, all_amp_layer_weights):
         imagenet_classes_dict = ast.literal_eval(imagenet_classes_file.read())
     # obtain the predicted ImageNet category
     ax.set_title(imagenet_classes_dict[pred])
-    K.clear_session()
+    print(imagenet_classes_dict[pred])
+    filename = secrets.token_hex(nbytes=16) + ".png"
+    plt.savefig("temp/" + filename)
+    return filename
 
 @app.route('/imageclassification', methods=['POST'])
 def classifiyimage():
     if not request.json:
         abort(400)
     content = request.json
-
     if not content["dataUrl"]:
         abort(400)
 
     print("loading image from url:" + content['dataUrl'])
 
     ResNet_model, all_amp_layer_weights = get_ResNet()
-    fig, ax = plt.subplots()
-    plot_ResNet_CAM(content['dataUrl'], ax, ResNet_model, all_amp_layer_weights)
-    filename = secrets.token_hex(nbytes=16) + ".png"
-    plt.savefig("temp/" + filename)
-
+    # get class activation map
+    CAM, pred = ResNet_CAM(content['dataUrl'], ResNet_model, all_amp_layer_weights)
+    filename=plot_ResNet_CAM(content['dataUrl'], CAM, pred)
     return send_file("temp/" + filename, mimetype='image/png')
 
 if __name__ == '__main__':
-    app.run(debug=True)
+    print(("* Loading Keras model and Flask starting server..."
+           "please wait until server has fully started"))
+    load_model()
+    app.run(port=5001)
